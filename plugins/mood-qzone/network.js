@@ -1,14 +1,14 @@
-// Scoped fallback for Windows networking and system proxies with fake-IP DNS. It can only contact
-// these fixed Wikimedia services; it never tunnels arbitrary model-supplied URLs.
+// Fixed image-search services and CDNs only; never tunnel arbitrary model-supplied URLs.
 import {execFileSync,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
 const run=promisify(execFile);
-const TRUSTED = new Set(['zh.wikipedia.org','commons.wikimedia.org','upload.wikimedia.org','thumb.wikimedia.org']);
+const TRUSTED = new Set(['zh.wikipedia.org','commons.wikimedia.org','upload.wikimedia.org','thumb.wikimedia.org',
+  'cn.bing.com','www.bing.com',...['ts','tse'].flatMap(prefix=>[1,2,3,4].map(n=>`${prefix}${n}.mm.bing.net`))]);
 export function trustedUrl(raw) {
   const u = new URL(raw);
   if (u.protocol !== 'https:' || u.username || u.password || (u.port && u.port !== '443') || !TRUSTED.has(u.hostname)) {
-    throw new Error('备用通道只允许固定的 Wikimedia HTTPS 服务');
+    throw new Error('备用通道只允许固定的图片搜索 HTTPS 服务');
   }
   return u;
 }
@@ -46,18 +46,43 @@ export function validateImage({buffer,contentType}) {
 async function windowsRequest(raw,{signal,cap}) {
   const marker='\nQQAGENT_HTTP_META\n';
   const proxy=systemProxy();
+  // Domestic Bing works directly even when the configured proxy cannot reach it.
+  const routes=new URL(raw).hostname.endsWith('bing.com')||new URL(raw).hostname.endsWith('.mm.bing.net')
+    ? [...new Set(['',proxy])]:[...new Set([proxy,''])];
+  const failures=[];
+  for(const route of routes) {
+  signal?.throwIfAborted();
+  try {
   const {stdout}=await run(path.join(process.env.SystemRoot||'C:\\Windows','System32','curl.exe'),[
     '--disable','--silent','--show-error','--max-time','15','--proto','=https','--max-redirs','0',
+    '--proxy',route,
     '--ssl-revoke-best-effort','--max-filesize',String(cap),
-    '--user-agent','QQAgent-Mood/1.1.2 (personal assistant)',
+    '--user-agent','Mozilla/5.0 (Windows NT 10.0; Win64; x64) QQAgent-Mood/1.1.3',
     '--write-out',marker+'%{http_code}\n%{content_type}\n%{redirect_url}',
     '--url',trustedUrl(raw).href
-  ],{encoding:'buffer',windowsHide:true,timeout:18000,maxBuffer:cap+8192,signal,
-    env:{...process.env,...(proxy?{HTTPS_PROXY:proxy,https_proxy:proxy}:{})}});
+  ],{encoding:'buffer',windowsHide:true,timeout:18000,maxBuffer:cap+8192,signal});
   const index=stdout.lastIndexOf(Buffer.from(marker));
   if(index<0)throw new Error('系统网络未返回响应状态');
   const [status,contentType,redirect]=stdout.subarray(index+Buffer.byteLength(marker)).toString('utf8').split('\n');
   return {status:Number(status),contentType,redirect,buffer:stdout.subarray(0,index)};
+  }catch(e){signal?.throwIfAborted();failures.push(`${route?'系统代理':'直连'}：${networkError(e)}`);}
+  }
+  throw new Error(failures.join('；'));
+}
+export function networkError(error) {
+  const detail=String(error.stderr||'').trim();
+  return detail?`curl ${error.code || ''}: ${detail.slice(0,200)}`:
+    `${error.code?error.code+': ':''}${String(error.message||error).split('\n')[0].slice(0,200)}`;
+}
+export function within(task,signal,milliseconds=4000) {
+  return new Promise((resolve,reject)=>{
+    const finish=(fn,value)=>{clearTimeout(timer);signal?.removeEventListener('abort',aborted);fn(value);};
+    const aborted=()=>finish(reject,signal.reason);
+    const timer=setTimeout(()=>finish(reject,new Error('宿主安全下载超时，改用系统网络')),milliseconds);
+    signal?.addEventListener('abort',aborted,{once:true});
+    Promise.resolve(task).then(v=>finish(resolve,v),e=>finish(reject,e));
+    if(signal?.aborted)aborted();
+  });
 }
 async function proxyRequest(raw,{signal,cap}) {
   const proxy=systemProxy();
@@ -104,7 +129,7 @@ export function createCommonsService({safeFetchBinary,checkLock,
     const cap=binary?5*1024*1024:1024*1024;
     signal?.throwIfAborted();allowed(url);
     try {
-      const r=await safeFetchBinary(url.href,cap,{browseLocked:true});
+      const r=await within(safeFetchBinary(url.href,cap,{browseLocked:true}),signal);
       signal?.throwIfAborted();allowed(url);
       if(r.buffer.length>=cap)throw new Error('备用网络内容超出大小限制');
       return binary?r:JSON.parse(r.buffer.toString('utf8'));
@@ -132,7 +157,7 @@ export function createCommonsService({safeFetchBinary,checkLock,
           return binary?r:JSON.parse(r.buffer.toString('utf8'));
         }
         throw new Error('备用网络重定向过多');
-      }catch(e){signal?.throwIfAborted();errors.push(e.message);}
+      }catch(e){signal?.throwIfAborted();errors.push(networkError(e));}
     }
     throw new Error(errors.join('；').slice(0,300));
   }
@@ -170,5 +195,56 @@ export function createCommonsService({safeFetchBinary,checkLock,
     }
     throw new Error('Wikimedia 没有可用配图'+(errors.length?'：'+errors.join('；').slice(0,500):'，可尝试英文配图关键词'));
   }
-  return {search,image};
+  async function bingImage(query,signal) {
+    const searchQuery=visualQuery(query);
+    const url='https://cn.bing.com/images/async?q='+encodeURIComponent(searchQuery)+'&count=6&first=1&adlt=strict';
+    const {buffer}=await trustedFetch(url,{binary:true,signal});
+    const candidates=parseBingImages(buffer.toString('utf8')).filter(item=>imageMatchesQuery(item.title,searchQuery));
+    const errors=[];
+    for(const item of candidates.slice(0,6)) {
+      signal?.throwIfAborted();
+      try {
+        // Fetch only Bing's own thumbnails; never pass external origin URLs to curl.
+        const r=await trustedFetch(item.thumbnail,{binary:true,signal});
+        validateImage(r);
+        return {data:'base64://'+r.buffer.toString('base64'),source:item.thumbnail,
+          page:item.page,title:item.title,provider:'Bing 图片',query:searchQuery};
+      }catch(e){signal?.throwIfAborted();errors.push(e.message);}
+    }
+    throw new Error(candidates.length?'Bing 缩略图下载失败：'+errors.join('；').slice(0,350):'Bing 图片页没有返回候选图，或结果标题与检索词无关');
+  }
+  return {search,image,bingImage};
+}
+
+function decodeHtml(value) {
+  return String(value).replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+    .replace(/&#(x[0-9a-f]+|\d+);/gi,(_,n)=>String.fromCodePoint(n[0].toLowerCase()==='x'?parseInt(n.slice(1),16):Number(n)))
+    .replace(/&amp;/g,'&');
+}
+export function parseBingImages(html) {
+  const out=[],seen=new Set();
+  for(const match of String(html).matchAll(/\bm\s*=\s*"([^"]+)"/g)) {
+    try {
+      const item=JSON.parse(decodeHtml(match[1]));
+      const thumbnail=trustedUrl(item.turl).href;
+      if(!new URL(thumbnail).hostname.endsWith('.mm.bing.net')||seen.has(thumbnail))continue;
+      seen.add(thumbnail);
+      out.push({thumbnail,page:/^https?:\/\//i.test(item.purl||'')?item.purl:null,title:plain(item.t||item.desc)});
+    }catch{}
+  }
+  return out;
+}
+const VAGUE=new Set(['deep','blue','calm','soft','beautiful','scene','landscape','photo','photograph','photography','image','picture','the','and','with','light','dark','quiet','peaceful']);
+function visualWords(query) {return (String(query).toLowerCase().match(/[a-z]{3,}/g)||[]).filter(w=>!VAGUE.has(w));}
+export function visualQuery(query) {
+  const words=visualWords(query).map(w=>w==='rainy'?'rain':w);
+  if(words.includes('rain')&&words.includes('window'))return 'rain window';
+  return words.length?words.slice(0,2).join(' '):query;
+}
+export function imageMatchesQuery(title,query) {
+  const text=String(title||'').toLowerCase();
+  const words=visualWords(query);
+  if(words.length)return words.filter(w=>new RegExp('\\b'+w.replace(/(?:ing|y|s)$/,'')+'[a-z]*\\b','i').test(text)).length>=Math.min(2,words.length);
+  const chinese=String(query).match(/[\u4e00-\u9fff]+/g)||[];
+  return chinese.some(part=>part.length>=2 && text.includes(part.slice(-2)));
 }

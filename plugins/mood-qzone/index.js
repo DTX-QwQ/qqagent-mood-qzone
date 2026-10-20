@@ -4,12 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { getConfig, DATA_DIR as HOST_DATA_DIR } from '../../src/config.js';
 import { chatCompletionWithRetry } from '../../src/llm.js';
 import { OneBotClient } from '../../src/onebot.js';
-import { webSearch, searchImages } from '../../src/web-search.js';
+import { webSearch } from '../../src/web-search.js';
 import { safeFetchBinary, checkBrowseLock } from '../../src/safe-fetch.js';
 
 // Propagate the loader's cache-busting query to our implementation on hot reload.
 const {MoodEngine,redact} = await import(new URL('./engine.js'+new URL(import.meta.url).search,import.meta.url));
-const {createCommonsService,imageType,validateImage} = await import(new URL('./network.js'+new URL(import.meta.url).search,import.meta.url));
+const {createCommonsService,imageType} = await import(new URL('./network.js'+new URL(import.meta.url).search,import.meta.url));
 const commons = createCommonsService({safeFetchBinary,checkLock:checkBrowseLock});
 const ID = 'mood-qzone';
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -73,26 +73,31 @@ function context(c) {
 
 async function image(query,signal,options={}) {
   signal?.throwIfAborted();
+  const boundedSignal=AbortSignal.any([signal||new AbortController().signal,AbortSignal.timeout(75000)]);
   const errors = [];
-  let list=[];
-  try {list=await searchImages(query,{limit:4,browseLocked:true});}
-  catch(e) {errors.push(e.message);}
-  for (const item of list) {
-    if (signal?.aborted) throw signal.reason;
+  const save=(result)=>{
     try {
-      // Download through the host's DNS/redirect/size/browser-lock checks, then upload bytes.
-      const {buffer,contentType} = await safeFetchBinary(item.url,5*1024*1024,{browseLocked:true});
-      if (signal?.aborted) throw signal.reason;
-      validateImage({buffer,contentType});
-      return {data:'base64://'+buffer.toString('base64'),source:item.url};
-    } catch(e) { errors.push(e.message); }
+      fs.mkdirSync(path.join(DATA_DIR,ID),{recursive:true});
+      fs.writeFileSync(path.join(DATA_DIR,ID,'image-diagnostic.json'),JSON.stringify({at:new Date().toISOString(),
+        query,fallbackQuery:options.fallbackQuery||'',...result,attemptErrors:errors},null,2));
+    }catch{}
+  };
+  const terms=[...new Set([options.fallbackQuery,query].filter(Boolean))];
+  const tasks=terms.map(term=>['Bing 图片',()=>commons.bingImage(term,boundedSignal)]);
+  if(getConfig().security?.browseLock?.enabled!==true)tasks.push(['Wikimedia',()=>commons.image(query,boundedSignal,options)]);
+  for(const [provider,fetchImage] of tasks) {
+    try{
+      const media=await fetchImage();
+      boundedSignal.throwIfAborted();
+      save({ok:true,provider:media.provider,source:media.source,bytes:Buffer.byteLength(media.data.slice(9),'base64')});
+      return media;
+    }catch(e){
+      errors.push(`${provider}：${e.message}`);
+      if(boundedSignal.aborted){save({ok:false,error:String(boundedSignal.reason)});throw boundedSignal.reason;}
+    }
   }
-  // Browser lock is authoritative: a fixed-source fallback must not bypass it.
-  if (getConfig().security?.browseLock?.enabled !== true) {
-    try {return await commons.image(query,signal,options);}
-    catch(e) {errors.push(e.message);}
-  }
-  throw new Error('候选配图都不可用：'+errors.join('；').slice(0,240));
+  save({ok:false});
+  throw new Error('候选配图都不可用：'+errors.join('；').slice(0,1000));
 }
 async function search(query) {
   try {return await webSearch(query);}
