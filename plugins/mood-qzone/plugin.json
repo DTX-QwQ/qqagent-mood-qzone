@@ -1,7 +1,7 @@
 {
   "id": "mood-qzone",
   "name": "心情签名与空间",
-  "version": "1.1.3",
+  "version": "1.2.0",
   "apiVersion": 1,
   "entry": "index.js",
   "category": "message",
@@ -20,7 +20,7 @@
         "id": "chat-mood",
         "title": "聊天触发心情签名与空间",
         "priority": 45,
-        "content": "用户明确让你更新心情签名、换个签名时，调用 mood-qzone__update_signature；让你发一条说说、发空间动态时，调用 mood-qzone__publish_post。可把用户本次的话题或风格传给 instruction，由插件根据你的性格和记忆生成。询问心情、次数或下次计划时调用 mood-qzone__status。聊天触发立即执行，不受每日次数、间隔、允许时段或失败冷却限制；每日次数设为 0 也能聊天触发。聊天动作不占定时配额，不影响定时任务间隔。配图、可见范围、只预览和插件总开关仍生效。不要因普通闲聊或有人问状态就擅自发布。只生成预览时必须说尚未发布；请求结果未确认时不要宣称成功，不要自动重发；限制被拒绝时如实解释。"
+        "content": "用户明确让你更新心情签名、换个签名时，调用 mood-qzone__update_signature；让你发一条说说、发空间动态时，调用 mood-qzone__publish_post。可把用户本次的话题或风格传给 instruction，由插件根据你的性格和记忆生成。询问心情、次数或下次计划时调用 mood-qzone__status。聊天触发立即执行，不受每日次数、间隔、允许时段或失败冷却限制；每日次数设为 0 也能聊天触发。聊天动作不占定时配额，不影响定时任务间隔。配图、可见范围、只预览和插件总开关仍生效。不要因普通闲聊或有人问状态就擅自发布。只生成预览时必须说尚未发布；请求结果未确认时不要宣称成功，不要自动重发；限制被拒绝时如实解释。 空间配图由 publish_post 内部完成，不要先调用内置 search_images 搜图；它失败也不影响插件自己的配图通道。"
       }
     ]
   },
@@ -40,7 +40,8 @@
     "visibility": "所有人可见",
     "memoryHours": 72,
     "extraStyle": "",
-    "previewOnly": false
+    "previewOnly": false,
+    "imageSource": "自动"
   },
   "configSchema": {
     "signatureDailyLimit": {
@@ -96,7 +97,7 @@
         "必须配图"
       ],
       "label": "说说要不要配图",
-      "description": "网上搜索 1 张贴合主题的图。尽量配图：找不到就发纯文字；必须配图：找不到就跳过这次并稍后再试。"
+      "description": "按配图来源挑 1 张图。尽量配图：无有效图则发纯文字；必须配图：无有效图则不发布。不配图仍不会联网找图。"
     },
     "imageQuery": {
       "type": "string",
@@ -127,6 +128,16 @@
       "type": "boolean",
       "label": "只生成预览，不修改 QQ",
       "description": "开启后仍按计划写心情，存入 preview.json，但不修改签名、不发说说。预览次数单独计数，关闭后不会占用真实发布配额。"
+    },
+    "imageSource": {
+      "type": "enum",
+      "values": [
+        "自动",
+        "梗鲸表情包",
+        "网络图片"
+      ],
+      "label": "配图来源",
+      "description": "自动先挑贴合正文的梗鲸表情包，无合适图时搜索网络图片。梗鲸免 Key、免配置；所有图片下载校验后上传，同一聊天不重复，定时发布单独去重。"
     }
   }
 }

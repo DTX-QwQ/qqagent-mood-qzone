@@ -3,7 +3,7 @@ import {execFileSync,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import path from 'node:path';
 const run=promisify(execFile);
-const TRUSTED = new Set(['zh.wikipedia.org','commons.wikimedia.org','upload.wikimedia.org','thumb.wikimedia.org',
+const TRUSTED = new Set(['aigengtu.com','img.aigengtu.com','zh.wikipedia.org','commons.wikimedia.org','upload.wikimedia.org','thumb.wikimedia.org',
   'cn.bing.com','www.bing.com',...['ts','tse'].flatMap(prefix=>[1,2,3,4].map(n=>`${prefix}${n}.mm.bing.net`))]);
 export function trustedUrl(raw) {
   const u = new URL(raw);
@@ -43,11 +43,11 @@ export function validateImage({buffer,contentType}) {
 }
 
 // No automatic redirects: the caller validates every next host, including CDN redirects.
-async function windowsRequest(raw,{signal,cap}) {
+export async function windowsRequest(raw,{signal,cap,proxyOverride,validate=()=>{}}) {
   const marker='\nQQAGENT_HTTP_META\n';
   const proxy=systemProxy();
   // Domestic Bing works directly even when the configured proxy cannot reach it.
-  const routes=new URL(raw).hostname.endsWith('bing.com')||new URL(raw).hostname.endsWith('.mm.bing.net')
+  const routes=proxyOverride!==undefined?[proxyOverride]:new URL(raw).hostname.endsWith('bing.com')||new URL(raw).hostname.endsWith('.mm.bing.net')
     ? [...new Set(['',proxy])]:[...new Set([proxy,''])];
   const failures=[];
   for(const route of routes) {
@@ -64,7 +64,10 @@ async function windowsRequest(raw,{signal,cap}) {
   const index=stdout.lastIndexOf(Buffer.from(marker));
   if(index<0)throw new Error('系统网络未返回响应状态');
   const [status,contentType,redirect]=stdout.subarray(index+Buffer.byteLength(marker)).toString('utf8').split('\n');
-  return {status:Number(status),contentType,redirect,buffer:stdout.subarray(0,index)};
+  const result={status:Number(status),contentType,redirect,buffer:stdout.subarray(0,index)};
+  if(result.status===200)validate(result);
+  else if(![301,302,303,307,308].includes(result.status))throw new Error('HTTP '+result.status);
+  return result;
   }catch(e){signal?.throwIfAborted();failures.push(`${route?'系统代理':'直连'}：${networkError(e)}`);}
   }
   throw new Error(failures.join('；'));
@@ -121,17 +124,19 @@ export function createCommonsService({safeFetchBinary,checkLock,
   nativeRequest=process.platform==='win32'?windowsRequest:null,requestProxy=proxyRequest}) {
   const allowed=raw=>{
     const lock=checkLock(trustedUrl(raw).href);
-    if(!lock.allowed)throw new Error('浏览锁定未允许 Wikimedia 服务');
+    if(!lock.allowed)throw new Error('浏览锁定未允许图片服务');
     return lock;
   };
-  async function trustedFetch(raw,{binary=false,signal}={}) {
+  async function trustedFetch(raw,{binary=false,signal,validate=()=>{}}={}) {
     let url=trustedUrl(raw);
-    const cap=binary?5*1024*1024:1024*1024;
+    const cap=binary?5*1024*1024:4*1024*1024;
+    const check=r=>{validate(r);if(!binary)JSON.parse(r.buffer.toString('utf8'));};
     signal?.throwIfAborted();allowed(url);
     try {
       const r=await within(safeFetchBinary(url.href,cap,{browseLocked:true}),signal);
       signal?.throwIfAborted();allowed(url);
       if(r.buffer.length>=cap)throw new Error('备用网络内容超出大小限制');
+      check(r);
       return binary?r:JSON.parse(r.buffer.toString('utf8'));
     }catch(e){
       signal?.throwIfAborted();
@@ -145,15 +150,16 @@ export function createCommonsService({safeFetchBinary,checkLock,
         for(let hop=0;hop<4;hop++) {
           signal?.throwIfAborted();
           if(allowed(url).enabled)throw new Error('浏览锁定已开启，停止备用连接');
-          const r=await request(url.href,{cap,signal});
+          const r=await request(url.href,{cap,signal,validate:check});
           signal?.throwIfAborted();
           if(allowed(url).enabled)throw new Error('浏览锁定已开启，停止备用连接');
           if([301,302,303,307,308].includes(r.status)) {
             if(!r.redirect)throw new Error('备用网络重定向缺少目标');
             url=trustedUrl(new URL(r.redirect,url));continue;
           }
-          if(r.status!==200)throw new Error('Wikimedia 服务 HTTP '+r.status);
+          if(r.status!==200)throw new Error('图片服务 HTTP '+r.status);
           if(r.buffer.length>=cap)throw new Error('备用网络内容超出大小限制');
+          check(r);
           return binary?r:JSON.parse(r.buffer.toString('utf8'));
         }
         throw new Error('备用网络重定向过多');
@@ -167,7 +173,7 @@ export function createCommonsService({safeFetchBinary,checkLock,
     if (!results.length) throw new Error('维基百科没有匹配话题');
     return {query,provider:'Wikimedia 备用：维基百科',results};
   }
-  async function image(query,signal,{fallbackQuery=''}={}) {
+  async function image(query,signal,{fallbackQuery='',excluded=[]}={}) {
     const errors=[];
     // Commons metadata is mainly English; prefer the model's concise visual translation.
     const terms=[...new Set([fallbackQuery,query].map(s=>String(s||'').trim()).filter(Boolean))].slice(0,2);
@@ -184,6 +190,7 @@ export function createCommonsService({safeFetchBinary,checkLock,
           if (!info || !/^image\/(jpeg|png|gif|webp)$/.test(info.mime)) continue;
           try {
             const url=info.thumburl || info.url;
+            if(excluded.includes(url))continue;
             const {buffer,contentType}=await trustedFetch(url,{binary:true,signal});
             validateImage({buffer,contentType});
             return {data:'base64://'+buffer.toString('base64'),source:url,
@@ -195,11 +202,11 @@ export function createCommonsService({safeFetchBinary,checkLock,
     }
     throw new Error('Wikimedia 没有可用配图'+(errors.length?'：'+errors.join('；').slice(0,500):'，可尝试英文配图关键词'));
   }
-  async function bingImage(query,signal) {
+  async function bingImage(query,signal,{excluded=[]}={}) {
     const searchQuery=visualQuery(query);
     const url='https://cn.bing.com/images/async?q='+encodeURIComponent(searchQuery)+'&count=6&first=1&adlt=strict';
     const {buffer}=await trustedFetch(url,{binary:true,signal});
-    const candidates=parseBingImages(buffer.toString('utf8')).filter(item=>imageMatchesQuery(item.title,searchQuery));
+    const candidates=parseBingImages(buffer.toString('utf8')).filter(item=>!excluded.includes(item.thumbnail)&&imageMatchesQuery(item.title,searchQuery));
     const errors=[];
     for(const item of candidates.slice(0,6)) {
       signal?.throwIfAborted();
@@ -213,7 +220,7 @@ export function createCommonsService({safeFetchBinary,checkLock,
     }
     throw new Error(candidates.length?'Bing 缩略图下载失败：'+errors.join('；').slice(0,350):'Bing 图片页没有返回候选图，或结果标题与检索词无关');
   }
-  return {search,image,bingImage};
+  return {search,image,bingImage,trustedFetch};
 }
 
 function decodeHtml(value) {

@@ -9,7 +9,7 @@ export const DEFAULTS = {
   signatureDailyLimit: 3, postDailyLimit: 1,
   signatureGapMinutes: 180, postGapMinutes: 360, actionGapMinutes: 10,
   activeHours: '09:00-22:00', selfName: '', interests: '', allowWebSearch: true,
-  imageMode: '不配图', imageQuery: '', visibility: '所有人可见',
+  imageMode: '不配图', imageQuery: '', imageSource:'自动', visibility: '所有人可见',
   memoryHours: 72, extraStyle: '', previewOnly: false
 };
 
@@ -44,6 +44,7 @@ export function configOf(raw = {}) {
   }
   for (const key of ['selfName','interests','activeHours','extraStyle','imageQuery']) c[key] = String(c[key] ?? '').trim();
   if (!['不配图','尽量配图','必须配图'].includes(c.imageMode)) throw new Error('配图方式无效');
+  if (!['自动','梗鲸表情包','网络图片'].includes(c.imageSource)) throw new Error('配图来源无效');
   if (!['所有人可见','好友可见','仅自己可见'].includes(c.visibility)) throw new Error('说说可见范围无效');
   for (const key of ['allowWebSearch','previewOnly']) if (typeof c[key] !== 'boolean') throw new Error(`${key} 必须为开关值`);
   windows(c.activeHours);
@@ -129,7 +130,7 @@ export class MoodEngine {
   constructor({dir, getConfig, context, complete, search, image, send, coordinator = {busy:false}, log = ()=>{}, now = Date.now}) {
     Object.assign(this,{dir,getConfig,context,complete,search,image,send,coordinator,log,now});
     this.file = path.join(dir,'state.json');
-    this.state = { version:1, history:[], retryAt:{}, mood:'', lastError:'', status:'未启动' };
+    this.state = { version:1, history:[], imageUsage:{}, retryAt:{}, mood:'', lastError:'', status:'未启动' };
     if (fs.existsSync(this.file)) {
       // Fail closed: a damaged quota journal must never silently become an empty journal.
       const old = readJson(this.file);
@@ -182,7 +183,7 @@ export class MoodEngine {
     try { this.config(); } catch {}
     this.state.status = '已停用'; this.persist();
   }
-  async draft(kind, c, signal, instruction = '') {
+  async draft(kind, c, signal, instruction = '', scope='qzone:timer') {
     const ctx = await this.context(c);
     const recent = this.state.history.slice(-12).map(r=>({kind:r.kind,text:r.text,mood:r.mood,at:new Date(r.ts).toISOString()}));
     const identity = {name:c.selfName || ctx.persona?.botName || '我', persona:ctx.persona,
@@ -223,8 +224,13 @@ export class MoodEngine {
       try {
         if (!iq || iq.includes('[')) throw new Error('没有可用配图关键词');
         const fallbackQuery = redact(result.imageQueryEn || plan.imageQueryEn || '').slice(0,100).trim();
-        media = await this.image(iq,signal,{fallbackQuery:fallbackQuery.includes('[')?'':fallbackQuery});
+        const used=this.state.imageUsage[scope]||[];
+        media = await this.image(iq,signal,{fallbackQuery:fallbackQuery.includes('[')?'':fallbackQuery,
+          imageSource:c.imageSource,memeQuery:[iq,result.mood,result.text].filter(Boolean).join(' ').slice(0,500),
+          excluded:used.map(x=>x.source),excludedHashes:used.map(x=>x.hash).filter(Boolean)});
         if (!media?.data) throw new Error('未找到可用图片');
+        media.hash ||= crypto.createHash('sha256').update(Buffer.from(media.data.slice(9),'base64')).digest('hex');
+        if(used.some(x=>x.source===media.source||x.hash===media.hash))throw Error('这张图片在当前会话已使用');
       } catch(e) {
         if (c.imageMode === '必须配图') throw new Error(`必须配图但图片不可用：${e.message}`);
         warnings.push(`配图失败，改发纯文字：${e.message}`);
@@ -234,16 +240,16 @@ export class MoodEngine {
     return {kind,text,mood:redact(result.mood || plan.mood || '').slice(0,80),
       media, sources, warnings, personaStamp:fingerprint(ctx.persona)};
   }
-  trigger(kind, {instruction = ''} = {}) {
+  trigger(kind, {instruction = '',scope='qzone:chat'} = {}) {
     if (!['signature','post'].includes(kind)) return Promise.resolve({ok:false,reason:'不支持的心情动作'});
-    return this.tick({kind,instruction:String(instruction).slice(0,300)});
+    return this.tick({kind,instruction:String(instruction).slice(0,300),scope});
   }
   manualGate(kind,c,now) {
     if (!c.enabled || !this.running) return {ok:false,reason:'插件已停用，请在控制台启用'};
     // Explicit chat requests bypass timer quotas, cooldowns and active hours.
     return {ok:true};
   }
-  async tick({kind:manualKind=null,instruction=''} = {}) {
+  async tick({kind:manualKind=null,instruction='',scope='qzone:timer'} = {}) {
     if (!this.running) return {ok:false,reason:'插件已停用'};
     let c;
     try { c = this.config(); }
@@ -254,6 +260,7 @@ export class MoodEngine {
       const saved = readJson(this.file);
       if (!Array.isArray(saved.history)) throw new Error('状态记录损坏，已停止调度');
       this.state.history = saved.history;
+      this.state.imageUsage = saved.imageUsage || {};
       this.state.mood = saved.mood || '';
       this.state.retryAt = saved.retryAt || {};
       this.state.lastError = saved.lastError || '';
@@ -285,7 +292,7 @@ export class MoodEngine {
     let record;
     try {
       this.state.status=`正在生成${kind==='signature'?'签名':'说说'}`; this.persist();
-      const draft = await this.draft(kind,c,this.controller.signal,instruction);
+      const draft = await this.draft(kind,c,this.controller.signal,instruction,scope);
       const fresh = this.config();
       if (!this.running || generation !== this.generation || stamp !== fingerprint(fresh)) {
         this.log('配置或启用状态已变化，取消旧内容发布'); return {ok:false,reason:'配置或启用状态已变化，已取消本次发布，请按新设置重新触发'};
@@ -304,7 +311,11 @@ export class MoodEngine {
         status:fresh.previewOnly?'preview':'sending',trigger:manualKind?'chat':'timer',text:draft.text,mood:draft.mood,
         imageSource:draft.media?.source || null,warnings:draft.warnings};
       // Durably reserve BEFORE any external side effect. A crash/timeout consumes the slot.
-      this.state.history.push(record); this.persist();
+      this.state.history.push(record);
+      if(!fresh.previewOnly && draft.media) {
+        (this.state.imageUsage[scope] ||= []).push({source:draft.media.source,hash:draft.media.hash});
+      }
+      this.persist();
       if (!fresh.previewOnly) {
         // From this point a stop cannot retract a request QQ has already accepted.
         clearTimeout(timeout);

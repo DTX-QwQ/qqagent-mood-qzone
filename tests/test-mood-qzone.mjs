@@ -27,6 +27,25 @@ function fixture(t,overrides={}) {
   return {e,f,options,dir};
 }
 
+test('图片按会话持久去重，重启仍保留，预览不占图片',async t=>{
+  let calls=0;
+  const {e,f,options}=fixture(t,{complete:async()=>++calls%2?
+    '{"mood":"开心","imageQuery":"摸鱼"}':JSON.stringify({text:'快乐摸鱼第'+calls+'回',mood:'开心',imageQuery:'摸鱼'})});
+  f.raw.imageMode='必须配图';
+  const first=await e.trigger('post',{scope:'private:1'});
+  assert.equal(first.ok,true);
+  assert.equal((await e.trigger('post',{scope:'private:1'})).ok,false);
+  assert.equal((await e.trigger('post',{scope:'private:2'})).ok,true);
+  e.stop();
+  const restored=new MoodEngine(options);restored.start();
+  try {
+    assert.equal((await restored.trigger('post',{scope:'private:1'})).ok,false);
+    f.raw.previewOnly=true;
+    assert.equal((await restored.trigger('post',{scope:'private:3'})).ok,true);
+    assert.equal(restored.state.imageUsage['private:3'],undefined);
+  }finally{restored.stop();}
+});
+
 test('配置的 0 次、跨午夜时段和错误输入',()=>{
   assert.equal(configOf({signatureDailyLimit:0}).signatureDailyLimit,0);
   assert.deepEqual(windows('22:00-02:00'),[[0,120],[1320,1440]]);
