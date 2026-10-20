@@ -1,0 +1,132 @@
+{
+  "id": "mood-qzone",
+  "name": "心情签名与空间",
+  "version": "1.1.1",
+  "apiVersion": 1,
+  "entry": "index.js",
+  "category": "message",
+  "author": "本机定制",
+  "enabledByDefault": true,
+  "permissions": [
+    "web_fetch"
+  ],
+  "capabilities": [
+    "mood.status"
+  ],
+  "requires": [],
+  "prompt": {
+    "sections": [
+      {
+        "id": "chat-mood",
+        "title": "聊天触发心情签名与空间",
+        "priority": 45,
+        "content": "用户明确让你更新心情签名、换个签名时，调用 mood-qzone__update_signature；让你发一条说说、发空间动态时，调用 mood-qzone__publish_post。可把用户本次的话题或风格传给 instruction，由插件根据你的性格和记忆生成。询问心情、次数或下次计划时调用 mood-qzone__status。聊天触发立即执行，不受每日次数、间隔、允许时段或失败冷却限制；每日次数设为 0 也能聊天触发。聊天动作不占定时配额，不影响定时任务间隔。配图、可见范围、只预览和插件总开关仍生效。不要因普通闲聊或有人问状态就擅自发布。只生成预览时必须说尚未发布；请求结果未确认时不要宣称成功，不要自动重发；限制被拒绝时如实解释。"
+      }
+    ]
+  },
+  "description": "独立定时器让 AI 根据聊天记忆、全局性格和近期心情更新 QQ 个性签名、发表空间说说，不需要有人先说话。设置保存后即时参与调度，生成中的旧配置内容会取消发布。聊天可直接要求更新签名或发说说，不受定时任务的每日次数、间隔和时段限制。定时任务的每天次数是硬上限；在允许时段内均匀安排，间隔过大或离线会少发，不会突破限制。所有时间按北京时间（UTC+8）。状态、发布记录、预览与配置快照保存在 data/mood-qzone/。默认每天 3 次签名、1 条说说，09:00–22:00，不配图。",
+  "settings": {
+    "signatureDailyLimit": 3,
+    "postDailyLimit": 1,
+    "signatureGapMinutes": 180,
+    "postGapMinutes": 360,
+    "actionGapMinutes": 10,
+    "activeHours": "09:00-22:00",
+    "selfName": "",
+    "interests": "",
+    "allowWebSearch": true,
+    "imageMode": "不配图",
+    "imageQuery": "",
+    "visibility": "所有人可见",
+    "memoryHours": 72,
+    "extraStyle": "",
+    "previewOnly": false
+  },
+  "configSchema": {
+    "signatureDailyLimit": {
+      "type": "number",
+      "label": "定时：每天最多改几次签名",
+      "description": "0=关闭定时签名更新；整数 0–48。次数不会因为热重载、重启或改配置而重置。 仅约束定时任务，聊天触发不受此项限制。"
+    },
+    "postDailyLimit": {
+      "type": "number",
+      "label": "定时：每天最多发几条说说",
+      "description": "0=关闭定时空间发布；整数 0–20。达到上限当天停止，间隔或时段不够时会少发。 仅约束定时任务，聊天触发不受此项限制。"
+    },
+    "signatureGapMinutes": {
+      "type": "number",
+      "label": "定时：两次签名至少间隔（分钟）",
+      "description": "1–10080，跨天仍遵守。默认 180 分钟。 仅约束定时任务，聊天触发不受此项限制。"
+    },
+    "postGapMinutes": {
+      "type": "number",
+      "label": "定时：两条说说至少间隔（分钟）",
+      "description": "1–10080，跨天仍遵守。默认 360 分钟。 仅约束定时任务，聊天触发不受此项限制。"
+    },
+    "actionGapMinutes": {
+      "type": "number",
+      "label": "定时：签名或说说两个动作至少间隔（分钟）",
+      "description": "1–1440。避免同一时刻连做两个动作，默认 10 分钟。 仅约束定时任务，聊天触发不受此项限制。"
+    },
+    "activeHours": {
+      "type": "string",
+      "label": "定时：只在这个时段运行（北京时间）",
+      "description": "格式 HH:MM-HH:MM，如 09:00-22:00；支持 22:00-02:00 跨午夜。留空或 00:00-00:00=全天。签名和说说都受约束。 仅约束定时任务，聊天触发不受此项限制。"
+    },
+    "selfName": {
+      "type": "string",
+      "label": "用哪个名字自称",
+      "description": "留空跟随全局人设里的机器人名字。可以用“我”，也可以填角色名字。"
+    },
+    "interests": {
+      "type": "string",
+      "label": "感兴趣的话题",
+      "description": "留空由 AI 从性格和记忆挑选；也可填音乐、游戏、天文等兴趣。联网只搜索兴趣关键词，不上传聊天记录到搜索引擎。"
+    },
+    "allowWebSearch": {
+      "type": "boolean",
+      "label": "允许联网找话题",
+      "description": "沿用 QQ Agent 搜索配置；失败时尝试系统代理访问维基百科。全局关闭搜索或开启浏览锁定时停止话题搜索；搜不到时按自己的感受写，不编造搜索结果。"
+    },
+    "imageMode": {
+      "type": "enum",
+      "values": [
+        "不配图",
+        "尽量配图",
+        "必须配图"
+      ],
+      "label": "说说要不要配图",
+      "description": "网上搜索 1 张贴合主题的图。尽量配图：找不到就发纯文字；必须配图：找不到就跳过这次并稍后再试。"
+    },
+    "imageQuery": {
+      "type": "string",
+      "label": "配图搜索词",
+      "description": "留空由 AI 按当前心情选择；填写后优先使用这里的词。图片搜索和下载遵守全局浏览锁定。"
+    },
+    "visibility": {
+      "type": "enum",
+      "values": [
+        "所有人可见",
+        "好友可见",
+        "仅自己可见"
+      ],
+      "label": "说说可见范围",
+      "description": "分别对应 SnowLuma 的 1 / 4 / 64 权限。"
+    },
+    "memoryHours": {
+      "type": "number",
+      "label": "参考最近多少小时的聊天",
+      "description": "整数 1–720，同时参考长期印象和最近发布的心情。不直接复述私聊原文、姓名、QQ 号或个人隐私。"
+    },
+    "extraStyle": {
+      "type": "string",
+      "label": "额外的心情写作要求",
+      "description": "如“短一点，像随手写的日记，偶尔用颜文字”。性格基础沿用全局人设。"
+    },
+    "previewOnly": {
+      "type": "boolean",
+      "label": "只生成预览，不修改 QQ",
+      "description": "开启后仍按计划写心情，存入 preview.json，但不修改签名、不发说说。预览次数单独计数，关闭后不会占用真实发布配额。"
+    }
+  }
+}

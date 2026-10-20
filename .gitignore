@@ -1,0 +1,12 @@
+node_modules/
+data/
+data-*/
+.env
+.env.*
+*.log
+*.tmp
+coverage/
+config-snapshot.json
+state.json
+preview.json
+generation-check.json
