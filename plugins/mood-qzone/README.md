@@ -4,7 +4,15 @@
 
 在控制台「插件 → 心情签名与空间 → 设置」配置后保存即可，约 2 秒内调度读取新值，无需重启。生成中的任务在发布前重新核对设置；如果设置变化，放弃旧内容。已经提交给 QQ 的请求无法撤回。
 
-## 聊天触发（v1.1.1）
+## 配图修复（v1.1.2）
+
+- 通用图片搜索不可用时，使用 Wikimedia Commons 的结构化搜索与图片元数据。
+- 备用网络先尝试宿主安全下载，再尝试 Windows 系统网络，最后尝试已配置的 HTTP 代理。没有开启系统代理也能使用 Windows 通道。
+- 支持 Commons 当前返回的 `thumb.wikimedia.org` 缩略图，以及 `upload.wikimedia.org` 原图。备用通道仅限固定 Wikimedia HTTPS 主机，逐跳检查重定向，仍受全局浏览锁定约束。
+- AI 为配图提供简短的英文视觉关键词；手填中文配图词仍优先用于通用搜索，并由 AI 翻译供 Commons 使用。英文无结果时再尝试原词。
+- 两条取图通道都校验图片字节类型与 5 MB 大小上限，失败时继续尝试候选图。停用或取消会终止备用网络请求。
+
+## 聊天触发
 
 在机器人能回应的私聊或群聊里直接说，群聊可先 @机器人：
 
@@ -24,7 +32,7 @@
 - 所有时间、每日配额归属均按 UTC+8（北京时间/新加坡时间）。时段支持跨午夜；结束时刻不发送。次数填 0 可分别关闭定时签名和定时说说，聊天触发不受影响。
 - 自称留空时跟随全局机器人名字；性格读取全局人设，参考最近聊天和长期印象。不修改原聊天、已读标记或记忆文件。
 - 联网沿用主程序的搜索配置。搜索关闭、失败或全局浏览锁定开启时，仍能根据记忆写心情；不会把没有搜索到的内容写成已知新闻。
-- 本机系统代理使用虚拟 IP 时，宿主的通用搜索/安全图片下载可能失败。插件会使用系统已启用的 HTTP 代理，备用搜索维基百科、取图 Wikimedia Commons。备用通道只允许三个固定的 Wikimedia HTTPS 主机、逐跳检查重定向并限制下载大小，不代理任意网址、不修改主程序网络或安全设置。全局浏览锁定开启时禁用备用通道。Commons 图的作者、许可和说明页会写入预览文件。
+- 本机网络使用虚拟 IP 时，宿主的通用搜索/安全图片下载可能失败。插件会通过 Windows 系统网络或已启用的 HTTP 代理，备用搜索维基百科、取图 Wikimedia Commons。备用通道只允许四个固定的 Wikimedia HTTPS 主机、逐跳检查重定向并限制下载大小。全局浏览锁定开启时禁用备用传输通道。Commons 图的作者、许可、说明页、图源与实际检索词会写入预览文件。
 - 配图有「不配图」「尽量配图」「必须配图」三种。后两者会搜索一张图，经主程序的安全下载层读取图片字节，再交给 SnowLuma 上传。最多 5 MB，支持 JPEG/PNG/GIF/WebP。找不到图时，尽量模式降级为文字，必须模式延后 30 分钟再试。
 - 「只生成预览，不修改 QQ」按计划写预览文件，不调用 QQ 写接口；预览与真实发布分别计数。
 
@@ -48,7 +56,7 @@
 
 ## 本机兼容依据
 
-本安装包未包含用户说明里的四份 `doc/extend_development/*.md`，README 指向的上游仓库也无法取到。实现对照本机 QQ Agent 0.4.0 的 `src/plugin-loader.js`、`src/skills/manifest.js`、`src/skills/manager.js`、`src/routes.js`、`src/llm.js`、`src/web-search.js` 与 SnowLuma `config-CEQwQxHY.js` 实际代码：
+本安装包未包含 `doc/extend_development/*.md`；开发目录已备有四份扩展文档。修复同时对照本机 QQ Agent 0.4.0 的 `src/plugin-loader.js`、`src/skills/manifest.js`、`src/skills/manager.js`、`src/routes.js`、`src/llm.js`、`src/web-search.js` 与 SnowLuma `config-CEQwQxHY.js` 实际代码：
 
 - 签名：`set_self_longnick({longNick: string})`。
 - 说说：`send_qzone_msg({content, images?: ["base64://…"], ugc_right})`，成功要求返回 `tid`。

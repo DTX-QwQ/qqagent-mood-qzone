@@ -5,11 +5,12 @@ import { getConfig, DATA_DIR as HOST_DATA_DIR } from '../../src/config.js';
 import { chatCompletionWithRetry } from '../../src/llm.js';
 import { OneBotClient } from '../../src/onebot.js';
 import { webSearch, searchImages } from '../../src/web-search.js';
-import { safeFetchBinary } from '../../src/safe-fetch.js';
+import { safeFetchBinary, checkBrowseLock } from '../../src/safe-fetch.js';
 
 // Propagate the loader's cache-busting query to our implementation on hot reload.
 const {MoodEngine,redact} = await import(new URL('./engine.js'+new URL(import.meta.url).search,import.meta.url));
-const {proxySearch,proxyImage} = await import(new URL('./network.js'+new URL(import.meta.url).search,import.meta.url));
+const {createCommonsService,imageType,validateImage} = await import(new URL('./network.js'+new URL(import.meta.url).search,import.meta.url));
+const commons = createCommonsService({safeFetchBinary,checkLock:checkBrowseLock});
 const ID = 'mood-qzone';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = (()=>{
@@ -70,14 +71,8 @@ function context(c) {
   };
 }
 
-function imageType(buf) {
-  if (buf.length>3 && buf[0]===0xff && buf[1]===0xd8 && buf[2]===0xff) return 'image/jpeg';
-  if (buf.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) return 'image/png';
-  if (/^GIF8[79]a/.test(buf.subarray(0,6).toString('ascii'))) return 'image/gif';
-  if (buf.subarray(0,4).toString()==='RIFF' && buf.subarray(8,12).toString()==='WEBP') return 'image/webp';
-  return '';
-}
-async function image(query,signal) {
+async function image(query,signal,options={}) {
+  signal?.throwIfAborted();
   const errors = [];
   let list=[];
   try {list=await searchImages(query,{limit:4,browseLocked:true});}
@@ -88,15 +83,13 @@ async function image(query,signal) {
       // Download through the host's DNS/redirect/size/browser-lock checks, then upload bytes.
       const {buffer,contentType} = await safeFetchBinary(item.url,5*1024*1024,{browseLocked:true});
       if (signal?.aborted) throw signal.reason;
-      if (!buffer.length || buffer.length>=5*1024*1024 || !/^image\//i.test(contentType) || !imageType(buffer)) {
-        throw new Error('图片类型不符或达到 5 MB 上限');
-      }
+      validateImage({buffer,contentType});
       return {data:'base64://'+buffer.toString('base64'),source:item.url};
     } catch(e) { errors.push(e.message); }
   }
   // Browser lock is authoritative: a fixed-source fallback must not bypass it.
   if (getConfig().security?.browseLock?.enabled !== true) {
-    try {return await proxyImage(query,signal);}
+    try {return await commons.image(query,signal,options);}
     catch(e) {errors.push(e.message);}
   }
   throw new Error('候选配图都不可用：'+errors.join('；').slice(0,240));
@@ -105,7 +98,7 @@ async function search(query) {
   try {return await webSearch(query);}
   catch(e) {
     if (getConfig().webSearch?.enabled === false || getConfig().security?.browseLock?.enabled === true) throw e;
-    return proxySearch(query);
+    return commons.search(query);
   }
 }
 async function complete(messages,signal) {
@@ -174,4 +167,4 @@ export function deactivate() { engine?.stop(); }
 export function dispose() { engine?.stop(); engine=null; }
 export const providers = {'mood.status':()=>engine?.status() || {running:false,status:'未初始化'}};
 // Read-only generation smoke check; does not invoke send or change quota.
-export const internals = {context,complete,imageType,image,search,engine:()=>engine};
+export const internals = {context,complete,imageType,image,search,send,engine:()=>engine};

@@ -101,6 +101,20 @@ test('配图尽量模式降级、必须模式跳过',async t=>{
   f.raw.imageMode='尽量配图';f.time+=31*60000;
   await e.tick();assert.equal(f.sent.length,1);assert.equal(f.sent[0].draft.media,null);
 });
+
+test('配置配图词保留原文，英文搜索词传到取图流程',async t=>{
+  const {e,f}=fixture(t);f.raw.imageMode='必须配图';f.raw.imageQuery='深蓝色海洋';
+  const prompts=[];e.complete=async messages=>{
+    const p=JSON.parse(messages[1].content);prompts.push(p);
+    return prompts.length===1?JSON.stringify({mood:'平静',imageQuery:'海',imageQueryEn:'blue sea'}):
+      JSON.stringify({text:'想听海浪。',mood:'平静',imageQuery:'海洋',imageQueryEn:'deep blue ocean'});
+  };
+  const calls=[];e.image=async(...args)=>{calls.push(args);return {data:'base64://test',source:'https://example.org/sea.jpg'};};
+  assert.equal((await e.trigger('post')).ok,true);
+  assert.equal(calls[0][0],'深蓝色海洋');assert.equal(calls[0][2].fallbackQuery,'deep blue ocean');
+  assert.ok(prompts.every(p=>p.imageSearchHint==='深蓝色海洋'));
+  assert.equal(f.sent[0].draft.media.data,'base64://test');
+});
 test('预览不调用 QQ，也不占真实发布次数',async t=>{
   const {e,f}=fixture(t);f.raw.previewOnly=true;
   await e.tick();assert.equal(f.sent.length,0);assert.equal(e.state.history[0].status,'preview');
