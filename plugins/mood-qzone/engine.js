@@ -10,8 +10,34 @@ export const DEFAULTS = {
   signatureGapMinutes: 180, postGapMinutes: 360, actionGapMinutes: 10,
   activeHours: '09:00-22:00', selfName: '', interests: '', allowWebSearch: true,
   imageMode: '不配图', imageQuery: '', imageSource:'自动', visibility: '所有人可见',
-  memoryHours: 72, extraStyle: '', previewOnly: false
+  memoryHours: 72, extraStyle: '', previewOnly: false, userWhitelist: ''
 };
+
+export function whitelistOf(raw = '') {
+  if (typeof raw !== 'string') throw new Error('用户白名单必须填写 QQ 号文本');
+  const ids = raw.trim() ? raw.trim().split(/[\s,，;；、]+/).filter(Boolean) : [];
+  if (ids.some(id=>!/^[1-9]\d{4,14}$/.test(id))) throw new Error('用户白名单只能填写 5–15 位数字 QQ 号，用逗号、空格或换行分隔');
+  return [...new Set(ids)].sort();
+}
+
+/** Only host session entries establish identity; model-supplied arguments never do. */
+export function requesterFromContext(ctx = {}) {
+  const entries = ctx.session?.trigger;
+  if (!Array.isArray(entries) || !entries.length) return '';
+  const ids = [];
+  for (const entry of entries) {
+    const id = String(entry?.senderId ?? '').trim();
+    if (entry?.self || !/^[1-9]\d{4,14}$/.test(id) || id === String(ctx.selfId ?? '')) return '';
+    if (ctx.kind === 'private' && id !== String(ctx.chatId ?? '')) return '';
+    ids.push(id);
+  }
+  // A batched group conversation cannot reliably attribute a request to one author.
+  return new Set(ids).size === 1 ? ids[0] : '';
+}
+
+export function memoryPolicy(c) {
+  return fingerprint({version:1,whitelist:whitelistOf(c.userWhitelist),users:c.memoryUserIds || whitelistOf(c.userWhitelist)});
+}
 
 export function localDay(ts) { return new Date(ts + OFFSET).toISOString().slice(0, 10); }
 function dayStart(ts) { return Date.parse(`${localDay(ts)}T00:00:00+08:00`); }
@@ -47,6 +73,7 @@ export function configOf(raw = {}) {
   if (!['自动','梗鲸表情包','网络图片'].includes(c.imageSource)) throw new Error('配图来源无效');
   if (!['所有人可见','好友可见','仅自己可见'].includes(c.visibility)) throw new Error('说说可见范围无效');
   for (const key of ['allowWebSearch','previewOnly']) if (typeof c[key] !== 'boolean') throw new Error(`${key} 必须为开关值`);
+  c.userWhitelist = whitelistOf(c.userWhitelist).join(',');
   windows(c.activeHours);
   return c;
 }
@@ -185,9 +212,10 @@ export class MoodEngine {
   }
   async draft(kind, c, signal, instruction = '', scope='qzone:timer') {
     const ctx = await this.context(c);
-    const recent = this.state.history.slice(-12).map(r=>({kind:r.kind,text:r.text,mood:r.mood,at:new Date(r.ts).toISOString()}));
+    const recent = this.state.history.filter(r=>r.memoryPolicy===memoryPolicy(c)).slice(-12)
+      .map(r=>({kind:r.kind,text:r.text,mood:r.mood,at:new Date(r.ts).toISOString()}));
     const identity = {name:c.selfName || ctx.persona?.botName || '我', persona:ctx.persona,
-      interests:c.interests, style:c.extraStyle, currentMood:this.state.mood,
+      interests:c.interests, style:c.extraStyle, currentMood:recent.at(-1)?.mood || '',
       memories:ctx.memories, recentPosts:recent,
       chatRequest:redact(instruction).slice(0,300),imageSearchHint:redact(c.imageQuery).slice(0,100)};
     const system = '你正在以 QQ Agent 的角色写自己的心情。遵循提供的性格，用自然的第一人称，不写助手汇报或 Markdown。'
@@ -240,20 +268,28 @@ export class MoodEngine {
     return {kind,text,mood:redact(result.mood || plan.mood || '').slice(0,80),
       media, sources, warnings, personaStamp:fingerprint(ctx.persona)};
   }
-  trigger(kind, {instruction = '',scope='qzone:chat'} = {}) {
+  trigger(kind, {instruction = '',scope='qzone:chat',requesterId=''} = {}) {
     if (!['signature','post'].includes(kind)) return Promise.resolve({ok:false,reason:'不支持的心情动作'});
-    return this.tick({kind,instruction:String(instruction).slice(0,300),scope});
+    return this.tick({kind,instruction:String(instruction).slice(0,300),scope,requesterId});
   }
-  manualGate(kind,c,now) {
+  manualGate(kind,c,now,requesterId) {
     if (!c.enabled || !this.running) return {ok:false,reason:'插件已停用，请在控制台启用'};
+    const users = whitelistOf(c.userWhitelist);
+    if (!users.length) return {ok:false,reason:'用户白名单为空，禁止聊天主动触发；请先在插件设置中添加 QQ 号'};
+    if (!requesterId) return {ok:false,reason:'无法确认唯一发起人，已拒绝；请由白名单用户单独发送请求'};
+    if (!users.includes(requesterId)) return {ok:false,reason:'发起人不在用户白名单中，禁止主动触发'};
     // Explicit chat requests bypass timer quotas, cooldowns and active hours.
     return {ok:true};
   }
-  async tick({kind:manualKind=null,instruction='',scope='qzone:timer'} = {}) {
+  async tick({kind:manualKind=null,instruction='',scope='qzone:timer',requesterId=''} = {}) {
     if (!this.running) return {ok:false,reason:'插件已停用'};
     let c;
     try { c = this.config(); }
     catch (e) { this.state.status='配置错误'; this.state.lastError=e.message; this.persist(); return {ok:false,reason:e.message}; }
+    if (manualKind) {
+      const gate=this.manualGate(manualKind,c,this.now(),requesterId);
+      if (!gate.ok) return gate;
+    }
     if (this.busy || this.coordinator.busy) return {ok:false,reason:'已有心情任务正在处理，请等待完成，不要重复触发'};
     // A previous hot-reloaded instance may have completed its already-submitted request.
     if (fs.existsSync(this.file)) {
@@ -273,10 +309,6 @@ export class MoodEngine {
     this.state.nextSignatureAt = this.state.nextSignatureAt && Math.ceil(this.state.nextSignatureAt/MINUTE)*MINUTE;
     this.state.nextPostAt = this.state.nextPostAt && Math.ceil(this.state.nextPostAt/MINUTE)*MINUTE;
     this.persist();
-    if (manualKind) {
-      const gate=this.manualGate(manualKind,c,now);
-      if (!gate.ok) return gate;
-    }
     if (!c.enabled || (!manualKind && !inWindow(c,now))) return;
     const ready = manualKind ? [manualKind] : ['signature','post'].filter(k=>{
       const at = nextDue(c,this.state,k,now); return at !== null && at <= now;
@@ -292,14 +324,15 @@ export class MoodEngine {
     let record;
     try {
       this.state.status=`正在生成${kind==='signature'?'签名':'说说'}`; this.persist();
-      const draft = await this.draft(kind,c,this.controller.signal,instruction,scope);
+      const memoryConfig = {...c,memoryUserIds:manualKind?[requesterId]:whitelistOf(c.userWhitelist)};
+      const draft = await this.draft(kind,memoryConfig,this.controller.signal,instruction,scope);
       const fresh = this.config();
       if (!this.running || generation !== this.generation || stamp !== fingerprint(fresh)) {
         this.log('配置或启用状态已变化，取消旧内容发布'); return {ok:false,reason:'配置或启用状态已变化，已取消本次发布，请按新设置重新触发'};
       }
       const at = this.now();
       if (manualKind) {
-        const gate=this.manualGate(kind,fresh,at);
+        const gate=this.manualGate(kind,fresh,at,requesterId);
         if (!gate.ok) return gate;
       } else if (!inWindow(fresh,at) || nextDue(fresh,this.state,kind,at) > at || nextDue(fresh,this.state,kind,at) === null) return;
       atomicJson(path.join(this.dir,'preview.json'),{generatedAt:new Date(at).toISOString(),
@@ -309,7 +342,8 @@ export class MoodEngine {
         imageProvider:draft.media?.provider || null,imageQuery:draft.media?.query || null});
       record = {id:crypto.randomUUID(),kind,ts:at,day:localDay(at),
         status:fresh.previewOnly?'preview':'sending',trigger:manualKind?'chat':'timer',text:draft.text,mood:draft.mood,
-        imageSource:draft.media?.source || null,warnings:draft.warnings};
+        imageSource:draft.media?.source || null,warnings:draft.warnings,
+        memoryPolicy:memoryPolicy(memoryConfig),requesterId:manualKind?requesterId:null};
       // Durably reserve BEFORE any external side effect. A crash/timeout consumes the slot.
       this.state.history.push(record);
       if(!fresh.previewOnly && draft.media) {

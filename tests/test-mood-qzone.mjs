@@ -15,7 +15,7 @@ test('系统代理备用通道仅接受固定公共 HTTPS 来源',()=>{
 });
 function fixture(t,overrides={}) {
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'mood-qzone-test-'));
-  const f={time:BASE,raw:{signatureDailyLimit:1,postDailyLimit:0,activeHours:'',allowWebSearch:false},sent:[],completed:0};
+  const f={time:BASE,raw:{userWhitelist:'10001,10002',signatureDailyLimit:1,postDailyLimit:0,activeHours:'',allowWebSearch:false},sent:[],completed:0};
   const options={dir,getConfig:()=>f.raw,now:()=>f.time,
     context:()=>({persona:{botName:'测试角色',roleText:'温柔，喜欢星空'},memories:{recent:[]},webEnabled:true}),
     complete:async()=>{f.completed++;return f.completed%2 ? '{"mood":"轻松","searchQuery":"天文","imageQuery":"星空"}' : '{"text":"今天也把小小的好奇心收进口袋。","mood":"轻松","imageQuery":"星空"}';},
@@ -32,16 +32,16 @@ test('图片按会话持久去重，重启仍保留，预览不占图片',async 
   const {e,f,options}=fixture(t,{complete:async()=>++calls%2?
     '{"mood":"开心","imageQuery":"摸鱼"}':JSON.stringify({text:'快乐摸鱼第'+calls+'回',mood:'开心',imageQuery:'摸鱼'})});
   f.raw.imageMode='必须配图';
-  const first=await e.trigger('post',{scope:'private:1'});
+  const first=await e.trigger('post',{requesterId:'10001',scope:'private:1'});
   assert.equal(first.ok,true);
-  assert.equal((await e.trigger('post',{scope:'private:1'})).ok,false);
-  assert.equal((await e.trigger('post',{scope:'private:2'})).ok,true);
+  assert.equal((await e.trigger('post',{requesterId:'10001',scope:'private:1'})).ok,false);
+  assert.equal((await e.trigger('post',{requesterId:'10001',scope:'private:2'})).ok,true);
   e.stop();
   const restored=new MoodEngine(options);restored.start();
   try {
-    assert.equal((await restored.trigger('post',{scope:'private:1'})).ok,false);
+    assert.equal((await restored.trigger('post',{requesterId:'10001',scope:'private:1'})).ok,false);
     f.raw.previewOnly=true;
-    assert.equal((await restored.trigger('post',{scope:'private:3'})).ok,true);
+    assert.equal((await restored.trigger('post',{requesterId:'10001',scope:'private:3'})).ok,true);
     assert.equal(restored.state.imageUsage['private:3'],undefined);
   }finally{restored.stop();}
 });
@@ -129,7 +129,7 @@ test('配置配图词保留原文，英文搜索词传到取图流程',async t=>
       JSON.stringify({text:'想听海浪。',mood:'平静',imageQuery:'海洋',imageQueryEn:'deep blue ocean'});
   };
   const calls=[];e.image=async(...args)=>{calls.push(args);return {data:'base64://test',source:'https://example.org/sea.jpg'};};
-  assert.equal((await e.trigger('post')).ok,true);
+  assert.equal((await e.trigger('post',{requesterId:'10001'})).ok,true);
   assert.equal(calls[0][0],'深蓝色海洋');assert.equal(calls[0][2].fallbackQuery,'deep blue ocean');
   assert.ok(prompts.every(p=>p.imageSearchHint==='深蓝色海洋'));
   assert.equal(f.sent[0].draft.media.data,'base64://test');
@@ -172,32 +172,32 @@ test('聊天触发可在定时点之前执行，并传递当次写作要求',asy
   const prompts=[];const original=e.complete;
   e.complete=async(messages,...rest)=>{prompts.push(JSON.parse(messages[1].content));return original(messages,...rest);};
   await e.tick();assert.equal(f.completed,0);
-  const result=await e.trigger('signature',{instruction:'写得轻松一点'});
+  const result=await e.trigger('signature',{requesterId:'10001',instruction:'写得轻松一点'});
   assert.equal(result.ok,true);assert.equal(f.sent.length,1);
   assert.equal(e.state.history[0].trigger,'chat');
   assert.ok(prompts.every(p=>p.chatRequest==='写得轻松一点'));
   // Another distinct draft is allowed immediately even with a daily limit of one.
   const complete=e.complete;
   e.complete=async(...args)=>(await complete(...args)).replace('今天也把小小的好奇心收进口袋。','现在想把新的好心情分享出去。');
-  assert.equal((await e.trigger('signature')).ok,true);
+  assert.equal((await e.trigger('signature',{requesterId:'10001'})).ok,true);
   assert.equal(f.sent.length,2);
 });
 test('聊天跳过时段、零配额和失败冷却，仍遵守并发及总开关',async t=>{
   const {e,f}=fixture(t);f.raw.activeHours='22:00-23:00';
   f.raw.signatureDailyLimit=0;
   e.state.retryAt.signature=f.time+3600000;e.persist();
-  assert.equal((await e.trigger('signature')).ok,true);
+  assert.equal((await e.trigger('signature',{requesterId:'10001'})).ok,true);
   assert.equal(e.state.retryAt.signature,f.time+3600000);
   e.coordinator.busy=true;
-  assert.match((await e.trigger('signature')).reason,/正在处理/);
+  assert.match((await e.trigger('signature',{requesterId:'10001'})).reason,/正在处理/);
   e.coordinator.busy=false;e.stop();
-  assert.equal((await e.trigger('signature')).ok,false);
+  assert.equal((await e.trigger('signature',{requesterId:'10001'})).ok,false);
   assert.equal(f.sent.length,1);
 });
 test('聊天在定时配额耗尽和定时最小间隔内仍能执行',async t=>{
   const {e,f}=fixture(t);
   e.state.history=[{kind:'signature',ts:f.time-1000,day:localDay(f.time),status:'success',trigger:'timer',text:'旧签名'}];e.persist();
-  assert.equal((await e.trigger('signature')).ok,true);
+  assert.equal((await e.trigger('signature',{requesterId:'10001'})).ok,true);
   const before=f.completed;await e.tick();
   assert.equal(f.completed,before);assert.equal(f.sent.length,1);
 });
@@ -209,19 +209,19 @@ test('聊天记录不占定时任务的次数和间隔',()=>{
 });
 test('聊天发说说遵守预览模式并返回真实执行结果',async t=>{
   const {e,f}=fixture(t);f.raw.signatureDailyLimit=0;f.raw.postDailyLimit=1;f.raw.previewOnly=true;
-  const preview=await e.trigger('post');
+  const preview=await e.trigger('post',{requesterId:'10001'});
   assert.equal(preview.ok,true);assert.equal(preview.status,'preview');assert.equal(f.sent.length,0);
   assert.match(preview.message,/未修改 QQ/);
   f.raw.previewOnly=false;
-  const result=await e.trigger('post');assert.equal(result.ok,true);
+  const result=await e.trigger('post',{requesterId:'10001'});assert.equal(result.ok,true);
   assert.equal(result.result.tid,'test-tid');assert.equal(result.status,'success');
   await e.tick();assert.equal(f.sent.length,1);
 });
 test('聊天触发中改配置或 QQ 请求失败不会报成已发布',async t=>{
   const {e,f}=fixture(t);const original=e.complete;
   e.complete=async(...args)=>{const out=await original(...args);if(f.completed===2)f.raw.selfName='新名字';return out;};
-  const cancelled=await e.trigger('signature');assert.equal(cancelled.ok,false);assert.equal(f.sent.length,0);
+  const cancelled=await e.trigger('signature',{requesterId:'10001'});assert.equal(cancelled.ok,false);assert.equal(f.sent.length,0);
   e.complete=original;e.send=async()=>{throw new Error('QQ timeout');};
-  const failed=await e.trigger('signature');assert.equal(failed.ok,false);assert.equal(failed.uncertain,true);
+  const failed=await e.trigger('signature',{requesterId:'10001'});assert.equal(failed.ok,false);assert.equal(failed.uncertain,true);
   assert.match(failed.message,/不要立即重发/);
 });

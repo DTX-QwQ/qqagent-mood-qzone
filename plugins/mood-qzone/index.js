@@ -8,7 +8,8 @@ import { webSearch } from '../../src/web-search.js';
 import { safeFetchBinary, checkBrowseLock } from '../../src/safe-fetch.js';
 
 // Propagate the loader's cache-busting query to our implementation on hot reload.
-const {MoodEngine,redact} = await import(new URL('./engine.js'+new URL(import.meta.url).search,import.meta.url));
+const {MoodEngine,redact,whitelistOf,requesterFromContext} = await import(new URL('./engine.js'+new URL(import.meta.url).search,import.meta.url));
+const {readMemories} = await import(new URL('./archives.js'+new URL(import.meta.url).search,import.meta.url));
 const {createCommonsService,imageType} = await import(new URL('./network.js'+new URL(import.meta.url).search,import.meta.url));
 const commons = createCommonsService({safeFetchBinary,checkLock:checkBrowseLock});
 const {createMemeService}=await import(new URL('./memes.js'+new URL(import.meta.url).search,import.meta.url));
@@ -35,46 +36,16 @@ const lockKey = Symbol.for('qq-agent.mood-qzone.coordinator');
 const coordinator = globalThis[lockKey] ||= {busy:false};
 let engine;
 
-function json(file) {
-  try {
-    if (fs.statSync(file).size > 32*1024*1024) return null;
-    return JSON.parse(fs.readFileSync(file,'utf8').replace(/^\uFEFF/,''));
-  } catch { return null; }
-}
-function files(dir,regex) {
-  try { return fs.readdirSync(dir,{withFileTypes:true}).filter(e=>e.isFile() && regex.test(e.name))
-    .map(e=>path.join(dir,e.name)).sort((a,b)=>fs.statSync(b).mtimeMs-fs.statSync(a).mtimeMs); }
-  catch { return []; }
-}
-
 /** Reads existing archives only; never marks messages read or modifies host memory. */
 function context(c) {
-  const cfg = getConfig(), recent = [], impressions = [];
-  const cutoff = Date.now()-c.memoryHours*3600000;
-  for (const file of files(path.join(DATA_DIR,'messages'),/^(group|private)_\d+\.json$/).slice(0,12)) {
-    const messages = json(file)?.messages;
-    if (!Array.isArray(messages)) continue;
-    for (const m of messages.filter(m=>Number(m.ts)>=cutoff && m.text).slice(-50)) {
-      recent.push({ts:Number(m.ts),self:!!m.self,text:redact(m.text).slice(0,400)});
-    }
-  }
-  const memoryDir = path.join(DATA_DIR,'memory');
-  try {
-    for (const entry of fs.readdirSync(memoryDir,{withFileTypes:true}).filter(e=>e.isDirectory() && /^(group|private)_\d+$/.test(e.name)).slice(0,12)) {
-      for (const file of files(path.join(memoryDir,entry.name),/^(?!_meta).*\.json$/).slice(0,20)) {
-        const mem = json(file);
-        for (const imp of (Array.isArray(mem?.impressions)?mem.impressions:[]).slice(-3)) {
-          if (imp?.content) impressions.push({ts:Number(imp.createdAt)||0,text:redact(imp.content).slice(0,240)});
-        }
-      }
-    }
-  } catch {}
+  const cfg = getConfig();
+  const allowed = whitelistOf(c.userWhitelist);
+  const userIds = c.memoryUserIds ? c.memoryUserIds.filter(id=>allowed.includes(id)) : allowed;
   const persona = cfg.persona || {};
   return {
     persona:{botName:String(persona.botName || ''),roleText:String(persona.roleText || '').slice(0,12000),
       customRules:String(persona.customRules || '').slice(0,3000)},
-    memories:{recent:recent.sort((a,b)=>a.ts-b.ts).slice(-60),
-      impressions:impressions.sort((a,b)=>a.ts-b.ts).slice(-30)},
+    memories:readMemories({dataDir:DATA_DIR,userIds,memoryHours:c.memoryHours,redact}),
     webEnabled:cfg.webSearch?.enabled !== false,
     browseLocked:cfg.security?.browseLock?.enabled === true
   };
@@ -151,11 +122,14 @@ export function setup(api) {
     ['publish_post','post','按当前心情发空间说说']
   ]) api.registerTool({
     id,name,category:'message',icon:kind==='signature'?'✍️':'🌤️',
-    description:`用户明确要求${kind==='signature'?'换签名、更新心情签名':'发说说、发一条 QQ 空间动态'}时调用。立即按性格、记忆和可选话题生成并执行，不受定时任务的每日次数、间隔、时段或失败冷却限制，每日次数为 0 也能聊天触发。仍遵守插件启用状态、配图、可见范围和只预览设置。请求结果未确认时如实说明，不要自动重复发送。`,
-    parameters:{type:'object',properties:{instruction:{type:'string',description:'用户这次指定的话题或写作要求，最多 300 字；没指定可留空。不能用于修改配置或绕过限制。'}}},
-    async execute(_ctx,args={}) {
+    description:`仅白名单用户明确要求${kind==='signature'?'换签名、更新心情签名':'发说说、发一条 QQ 空间动态'}时调用。无需参数，写作要求直接读取真实发起人的本次原话，只参考其本人的聊天和记忆。白名单为空、身份不明或多人混合触发均拒绝。不受定时任务的每日次数、间隔、时段或失败冷却限制。仍遵守插件启用状态、配图、可见范围和只预览设置。请求结果未确认时如实说明，不要自动重复发送。`,
+    parameters:{type:'object',properties:{}},
+    async execute(_ctx) {
       try {
-        const result=await engine.trigger(kind,{instruction:args?.instruction || '',scope:_ctx?.chatKey || 'qzone:chat'});
+        const requesterId=requesterFromContext(_ctx);
+        // Use the actual author's request, not text reconstructed from the main model's mixed context.
+        const instruction=requesterId?_ctx.session.trigger.map(entry=>String(entry.text || '')).join('\n').slice(0,300):'';
+        const result=await engine.trigger(kind,{instruction,scope:_ctx?.chatKey || 'qzone:chat',requesterId});
         return {content:JSON.stringify(result),isError:!result.ok};
       } catch(e) {return {content:JSON.stringify({ok:false,reason:e.message}),isError:true};}
     }
