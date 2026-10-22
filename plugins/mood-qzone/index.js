@@ -45,7 +45,8 @@ function context(c) {
   return {
     persona:{botName:String(persona.botName || ''),roleText:String(persona.roleText || '').slice(0,12000),
       customRules:String(persona.customRules || '').slice(0,3000)},
-    memories:readMemories({dataDir:DATA_DIR,userIds,memoryHours:c.memoryHours,redact}),
+    memories:readMemories({dataDir:DATA_DIR,userIds,memoryHours:c.memoryHours,redact,
+      fromTs:c.memoryFrom,untilTs:c.memoryUntil,includeImpressions:c.memoryFrom===undefined}),
     webEnabled:cfg.webSearch?.enabled !== false,
     browseLocked:cfg.security?.browseLock?.enabled === true
   };
@@ -147,6 +148,7 @@ export function setup(api) {
         return {content:JSON.stringify({running:s.running,busy:s.busy,mood:s.mood,status:s.status,
           lastError:s.lastError,today:s.today,signatureUsed:used('signature'),postUsed:used('post'),
           chatSignatureUsed:chatUsed('signature'),chatPostUsed:chatUsed('post'),
+          diaryEnabled:s.diaryEnabled,diaryUsed:used('diary'),nextDiaryAt:s.nextDiaryAt,
           settings:api.config(),nextSignatureAt:s.nextSignatureAt,nextPostAt:s.nextPostAt,
           recent:history.slice(-5)}),isError:false};
       } catch(e) {return {content:JSON.stringify({ok:false,reason:e.message}),isError:true};}
